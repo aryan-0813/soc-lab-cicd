@@ -1,0 +1,56 @@
+name: Semgrep SAST Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  semgrep:
+    name: Semgrep Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep SAST
+        run: |
+          semgrep scan \
+            --config "p/python" \
+            --config "p/security-audit" \
+            --config "p/owasp-top-ten" \
+            --json \
+            --output semgrep-results.json \
+            src/
+        continue-on-error: true
+
+      - name: Display Results
+        run: |
+          echo "=== SEMGREP FINDINGS ==="
+          cat semgrep-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('results', [])
+          print(f'Total findings: {len(results)}')
+          for r in results:
+              print(f\"[{r['extra']['severity']}] {r['check_id']}\")
+              print(f\"  File: {r['path']}:{r['start']['line']}\")
+              print(f\"  Message: {r['extra']['message']}\")
+              print()
+          "
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
