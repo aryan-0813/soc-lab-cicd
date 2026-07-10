@@ -6,9 +6,11 @@ import hashlib
 app = Flask(__name__)
 
 # VULNERABILITY 1: Hardcoded credentials
-DB_PASSWORD = "admin123"
-API_KEY = "sk-1234567890abcdef"
-SECRET_KEY = "supersecretkey"
+DB_PASSWORD = "P@ssw0rd#2024$ecure!"
+API_KEY = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop"
+SECRET_KEY = "ghp_16C7e42F292c6912E169Taylor0King9"
+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 # VULNERABILITY 2: SQL Injection
 @app.route('/user')
