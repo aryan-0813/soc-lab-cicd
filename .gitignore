@@ -1,0 +1,16 @@
+# Scan results - never commit these
+*.sarif
+semgrep-results.json
+trufflehog-results.json
+gitleaks-results.sarif
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Secrets - just in case
+.env.local
+.env.production
