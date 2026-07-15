@@ -11,7 +11,7 @@ on:
 jobs:
   pip-audit:
     name: Python Dependency Audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, cicd]
     
     steps:
       - name: Checkout code
@@ -63,7 +63,7 @@ jobs:
 
   dependabot-check:
     name: Check Dependabot Config
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, cicd]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

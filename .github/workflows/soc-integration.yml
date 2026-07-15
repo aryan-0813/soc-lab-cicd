@@ -1,0 +1,128 @@
+name: SOC Integration — Send Findings to Wazuh
+
+on:
+  workflow_run:
+    workflows: ["Semgrep SAST Scan", "Secrets Scanning", "Dependency Vulnerability Scan"]
+    types: [completed]
+
+jobs:
+  send-to-soc:
+    name: Send Security Findings to SOC
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion != 'cancelled' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Send findings to Wazuh
+        env:
+          WAZUH_URL: ${{ secrets.WAZUH_URL }}
+          WAZUH_API_USER: ${{ secrets.WAZUH_API_USER }}
+          WAZUH_API_PASS: ${{ secrets.WAZUH_API_PASS }}
+        run: |
+          python3 << 'PYTHON'
+          import json
+          import os
+          import requests
+          import datetime
+
+          wazuh_url = os.environ.get('WAZUH_URL')
+          wazuh_user = os.environ.get('WAZUH_API_USER')
+          wazuh_pass = os.environ.get('WAZUH_API_PASS')
+
+          findings = []
+
+          # Parse Semgrep results
+          if os.path.exists('semgrep-results/semgrep-results.json'):
+              with open('semgrep-results/semgrep-results.json') as f:
+                  data = json.load(f)
+                  for r in data.get('results', []):
+                      findings.append({
+                          'type': 'SAST',
+                          'tool': 'Semgrep',
+                          'severity': r['extra']['severity'],
+                          'rule': r['check_id'],
+                          'file': r['path'],
+                          'line': r['start']['line'],
+                          'message': r['extra']['message'],
+                          'repo': '${{ github.repository }}',
+                          'branch': '${{ github.ref_name }}',
+                          'commit': '${{ github.sha }}'
+                      })
+
+          # Parse pip-audit results
+          if os.path.exists('pip-audit-results/pip-audit-results.json'):
+              with open('pip-audit-results/pip-audit-results.json') as f:
+                  data = json.load(f)
+                  for dep in data.get('dependencies', []):
+                      for vuln in dep.get('vulns', []):
+                          findings.append({
+                              'type': 'SCA',
+                              'tool': 'pip-audit',
+                              'severity': 'HIGH',
+                              'rule': vuln['id'],
+                              'package': dep['name'],
+                              'version': dep['version'],
+                              'message': vuln['description'][:200],
+                              'fix': str(vuln.get('fix_versions', [])),
+                              'repo': '${{ github.repository }}',
+                              'branch': '${{ github.ref_name }}',
+                              'commit': '${{ github.sha }}'
+                          })
+
+          print(f'Total findings to send: {len(findings)}')
+
+          if not findings:
+              print('No findings to send')
+              exit(0)
+
+          if not wazuh_url:
+              print('WAZUH_URL not configured - skipping SOC integration')
+              print('Configure GitHub Secrets to enable SOC integration:')
+              print('  WAZUH_URL, WAZUH_API_USER, WAZUH_API_PASS')
+              exit(0)
+
+          # Send to Wazuh via custom API
+          for finding in findings:
+              payload = {
+                  'timestamp': datetime.datetime.utcnow().isoformat(),
+                  'source': 'github-actions',
+                  'finding': finding
+              }
+              try:
+                  resp = requests.post(
+                      f'{wazuh_url}/api/v1/cicd/finding',
+                      json=payload,
+                      auth=(wazuh_user, wazuh_pass),
+                      verify=False,
+                      timeout=10
+                  )
+                  print(f"Sent finding: {finding['rule']} → {resp.status_code}")
+              except Exception as e:
+                  print(f"Failed to send: {e}")
+
+          PYTHON
+
+      - name: Summary Report
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Findings |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|----------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f semgrep-results/semgrep-results.json ]; then
+            COUNT=$(cat semgrep-results/semgrep-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('results',[])))")
+            echo "| Semgrep SAST | $COUNT findings |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f pip-audit-results/pip-audit-results.json ]; then
+            COUNT=$(cat pip-audit-results/pip-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(len(dep.get('vulns',[])) for dep in d.get('dependencies',[])))")
+            echo "| pip-audit SCA | $COUNT vulnerabilities |" >> $GITHUB_STEP_SUMMARY
+          fi
