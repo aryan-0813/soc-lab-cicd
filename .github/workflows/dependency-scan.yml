@@ -14,6 +14,7 @@ jobs:
     runs-on: [self-hosted, linux, cicd]
     container:
       image: python:3.10-slim
+      options: --network host
     
     steps:
       - name: Checkout code
@@ -68,6 +69,7 @@ jobs:
     runs-on: [self-hosted, linux, cicd]
     container:
       image: python:3.10-slim
+      options: --network host
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
