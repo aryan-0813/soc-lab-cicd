@@ -12,6 +12,8 @@ jobs:
   pip-audit:
     name: Python Dependency Audit
     runs-on: [self-hosted, linux, cicd]
+    container:
+      image: python:3.10-slim
     
     steps:
       - name: Checkout code
@@ -64,6 +66,8 @@ jobs:
   dependabot-check:
     name: Check Dependabot Config
     runs-on: [self-hosted, linux, cicd]
+    container:
+      image: python:3.10-slim
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
