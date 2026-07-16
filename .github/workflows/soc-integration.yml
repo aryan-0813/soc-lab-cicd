@@ -1,4 +1,4 @@
-name: SOC Integration — Send Findings to Wazuh
+name: SOC Integration
 
 on:
   workflow_run:
@@ -7,8 +7,10 @@ on:
 
 jobs:
   send-to-soc:
-    name: Send Security Findings to SOC
-    runs-on: ubuntu-latest
+    name: Send Findings to SOC
+    runs-on: [self-hosted, linux, cicd]
+    container:
+      image: python:3.10
     if: ${{ github.event.workflow_run.conclusion != 'cancelled' }}
 
     steps:
@@ -22,11 +24,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Send findings to Wazuh
+      - name: Install requests
+        run: pip install requests
+
+      - name: Send findings to Shuffle
         env:
-          WAZUH_URL: ${{ secrets.WAZUH_URL }}
-          WAZUH_API_USER: ${{ secrets.WAZUH_API_USER }}
-          WAZUH_API_PASS: ${{ secrets.WAZUH_API_PASS }}
+          SHUFFLE_WEBHOOK: ${{ secrets.SHUFFLE_WEBHOOK_URL }}
         run: |
           python3 << 'PYTHON'
           import json
@@ -34,9 +37,11 @@ jobs:
           import requests
           import datetime
 
-          wazuh_url = os.environ.get('WAZUH_URL')
-          wazuh_user = os.environ.get('WAZUH_API_USER')
-          wazuh_pass = os.environ.get('WAZUH_API_PASS')
+          webhook_url = os.environ.get('SHUFFLE_WEBHOOK')
+
+          if not webhook_url:
+              print('SHUFFLE_WEBHOOK_URL not configured')
+              exit(0)
 
           findings = []
 
@@ -57,6 +62,27 @@ jobs:
                           'branch': '${{ github.ref_name }}',
                           'commit': '${{ github.sha }}'
                       })
+
+          # Parse TruffleHog results
+          if os.path.exists('trufflehog-results/trufflehog-results.json'):
+              with open('trufflehog-results/trufflehog-results.json') as f:
+                  try:
+                      data = json.load(f)
+                      if isinstance(data, list):
+                          for s in data:
+                              findings.append({
+                                  'type': 'SECRET',
+                                  'tool': 'TruffleHog',
+                                  'severity': s.get('severity', 'MEDIUM'),
+                                  'rule': s.get('rule', {}).get('id', 'unknown'),
+                                  'file': s.get('path', 'unknown'),
+                                  'message': s.get('rule', {}).get('message', 'Secret detected'),
+                                  'repo': '${{ github.repository }}',
+                                  'branch': '${{ github.ref_name }}',
+                                  'commit': '${{ github.sha }}'
+                              })
+                  except:
+                      pass
 
           # Parse pip-audit results
           if os.path.exists('pip-audit-results/pip-audit-results.json'):
@@ -81,48 +107,41 @@ jobs:
           print(f'Total findings to send: {len(findings)}')
 
           if not findings:
-              print('No findings to send')
+              print('No findings — clean pipeline!')
               exit(0)
 
-          if not wazuh_url:
-              print('WAZUH_URL not configured - skipping SOC integration')
-              print('Configure GitHub Secrets to enable SOC integration:')
-              print('  WAZUH_URL, WAZUH_API_USER, WAZUH_API_PASS')
-              exit(0)
-
-          # Send to Wazuh via custom API
+          # Send each finding to Shuffle
+          sent = 0
+          failed = 0
           for finding in findings:
               payload = {
                   'timestamp': datetime.datetime.utcnow().isoformat(),
-                  'source': 'github-actions',
+                  'source': 'github-cicd',
+                  'repository': '${{ github.repository }}',
                   'finding': finding
               }
               try:
                   resp = requests.post(
-                      f'{wazuh_url}/api/v1/cicd/finding',
+                      webhook_url,
                       json=payload,
-                      auth=(wazuh_user, wazuh_pass),
-                      verify=False,
-                      timeout=10
+                      timeout=10,
+                      verify=False
                   )
-                  print(f"Sent finding: {finding['rule']} → {resp.status_code}")
+                  if resp.status_code == 200:
+                      sent += 1
+                      print(f"✅ Sent: [{finding['type']}] {finding.get('rule', 'unknown')}")
+                  else:
+                      failed += 1
+                      print(f"❌ Failed: {resp.status_code}")
               except Exception as e:
-                  print(f"Failed to send: {e}")
+                  failed += 1
+                  print(f"❌ Error: {e}")
 
+          print(f"\nSummary: {sent} sent, {failed} failed")
           PYTHON
 
-      - name: Summary Report
+      - name: Job Summary
         run: |
-          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Tool | Findings |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|----------|" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f semgrep-results/semgrep-results.json ]; then
-            COUNT=$(cat semgrep-results/semgrep-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('results',[])))")
-            echo "| Semgrep SAST | $COUNT findings |" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          if [ -f pip-audit-results/pip-audit-results.json ]; then
-            COUNT=$(cat pip-audit-results/pip-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(len(dep.get('vulns',[])) for dep in d.get('dependencies',[])))")
-            echo "| pip-audit SCA | $COUNT vulnerabilities |" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "## SOC Integration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Findings sent to Shuffle SOAR → TheHive" >> $GITHUB_STEP_SUMMARY
+          echo "Check TheHive for new alerts: http://10.8.0.1:9000" >> $GITHUB_STEP_SUMMARY
