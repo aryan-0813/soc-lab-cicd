@@ -27,9 +27,11 @@ jobs:
       - name: Install requests
         run: pip install requests
 
-      - name: Send findings to Shuffle
+      - name: Send findings to Wazuh
         env:
-          SHUFFLE_WEBHOOK: ${{ secrets.SHUFFLE_WEBHOOK_URL }}
+          WAZUH_API_URL: ${{ secrets.WAZUH_API_URL }}
+          WAZUH_API_USER: ${{ secrets.WAZUH_API_USER }}
+          WAZUH_API_PASS: ${{ secrets.WAZUH_API_PASS }}
         run: |
           python3 << 'PYTHON'
           import json
@@ -37,11 +39,34 @@ jobs:
           import requests
           import datetime
 
-          webhook_url = os.environ.get('SHUFFLE_WEBHOOK')
+          wazuh_url = os.environ.get('WAZUH_API_URL')
+          wazuh_user = os.environ.get('WAZUH_API_USER')
+          wazuh_pass = os.environ.get('WAZUH_API_PASS')
 
-          if not webhook_url:
-              print('SHUFFLE_WEBHOOK_URL not configured')
+          if not wazuh_url or not wazuh_user or not wazuh_pass:
+              print('Wazuh API credentials not fully configured')
               exit(0)
+
+
+          def get_jwt_token(url, user, password):
+              resp = requests.get(
+                  f"{url}/security/user/authenticate",
+                  auth=(user, password),
+                  verify=False
+              )
+              if resp.status_code != 200:
+                  print(f"❌ Wazuh authentication failed: {resp.status_code} - {resp.text}")
+                  return None
+              return resp.json()['data']['token']
+
+
+          token = get_jwt_token(wazuh_url, wazuh_user, wazuh_pass)
+
+          if not token:
+              print('Could not obtain Wazuh token — aborting SOC integration for this run')
+              exit(1)
+
+          wazuh_events_url = f"{wazuh_url}/events"
 
           findings = []
 
@@ -110,9 +135,9 @@ jobs:
               print('No findings — clean pipeline!')
               exit(0)
 
-          # Send each finding to Shuffle
-          sent = 0
-          failed = 0
+          # Build one JSON-encoded string per finding (Wazuh's /events API
+          # requires each item in "events" to be a string, not a raw object)
+          event_strings = []
           for finding in findings:
               payload = {
                   'timestamp': datetime.datetime.utcnow().isoformat(),
@@ -120,28 +145,34 @@ jobs:
                   'repository': '${{ github.repository }}',
                   'finding': finding
               }
-              try:
-                  resp = requests.post(
-                      webhook_url,
-                      json=payload,
-                      timeout=10,
-                      verify=False
-                  )
-                  if resp.status_code == 200:
-                      sent += 1
-                      print(f"✅ Sent: [{finding['type']}] {finding.get('rule', 'unknown')}")
-                  else:
-                      failed += 1
-                      print(f"❌ Failed: {resp.status_code}")
-              except Exception as e:
-                  failed += 1
-                  print(f"❌ Error: {e}")
+              event_strings.append(json.dumps(payload))
+              print(f"Queued: [{finding['type']}] {finding.get('rule', 'unknown')}")
 
-          print(f"\nSummary: {sent} sent, {failed} failed")
+          # Send all findings in a single batched request
+          try:
+              resp = requests.post(
+                  wazuh_events_url,
+                  json={"events": event_strings},
+                  headers={'Authorization': f'Bearer {token}'},
+                  timeout=10,
+                  verify=False
+              )
+              if resp.status_code in (200, 201):
+                  body = resp.json()
+                  sent = body.get('data', {}).get('total_affected_items', len(event_strings))
+                  failed = body.get('data', {}).get('total_failed_items', 0)
+                  print(f"✅ Batch sent: {sent} accepted, {failed} failed")
+                  if body.get('data', {}).get('failed_items'):
+                      print(f"Failed items: {body['data']['failed_items']}")
+              else:
+                  print(f"❌ Batch failed: {resp.status_code} - {resp.text}")
+          except Exception as e:
+              print(f"❌ Error sending batch: {e}")
+
           PYTHON
 
       - name: Job Summary
         run: |
           echo "## SOC Integration Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Findings sent to Shuffle SOAR → TheHive" >> $GITHUB_STEP_SUMMARY
+          echo "Findings sent to Wazuh → Shuffle SOAR → TheHive" >> $GITHUB_STEP_SUMMARY
           echo "Check TheHive for new alerts: http://10.8.0.1:9000" >> $GITHUB_STEP_SUMMARY
